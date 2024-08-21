@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from getpass import getpass
 import os
 import pathlib
 import pprint
@@ -51,6 +52,8 @@ def ensure_exists(file: pathlib.Path) -> bool:
         if wants_to_download:
             download_git_filter_repo(file)
         exists = file.exists()
+        if not exists:
+            raise FileNotFoundError('git-filter-repo failed to download. Are you behind a proxy? Proxies are not currently supported.')
     else:
         wants_to_use_existing = user_prompt_yes_no(
             f"{file.as_posix()} exists. Would you like to use this one?"
@@ -68,8 +71,8 @@ def download_git_filter_repo(path: pathlib.Path) -> bool:
     try:
         resp = requests.get(url)
         path.write_bytes(resp.content)
-    except:
-        return False
+    except Exception:
+        raise
 
     return True
 
@@ -99,19 +102,30 @@ class GitRepo:
     def __post_init__(self) -> None:
         self.origin = self.ssh_url
 
+@dataclass
+class GithubOptions:
+    api_url: str = 'https://api.github.com/users/{github_user}/repos'
+    api_token: str | None = None
+
+
 
 class GitClient:
     def __init__(
-        self, git_filter_repo_path: pathlib.Path, base_working_dir: pathlib.Path
+        self, git_filter_repo_path: pathlib.Path, base_working_dir: pathlib.Path, github_options: GithubOptions = GithubOptions()
     ) -> None:
         self._git_filter_repo_path = git_filter_repo_path
         self._working_dir = base_working_dir / "repo-update-working_dir"
         self._working_dir.mkdir(parents=True, exist_ok=True)
+        self._github_api_base_url: str = github_options.api_url
+        self._github_api_token: str | None = github_options.api_token
 
-    @classmethod
-    def get_repo_list(cls, github_user: str) -> list[GitRepo]:
-        api = f"https://api.github.com/users/{github_user}/repos"
-        response: list[dict] = requests.get(api).json()
+    def get_repo_list(self, github_user: str) -> list[GitRepo]:
+        api = str.format(self._github_api_base_url, github_user=github_user)
+        response: list[dict]
+        if self._github_api_token:
+            response = requests.get(api, headers={'Authorization': f'Bearer {self._github_api_token}'}).json()
+        else:
+            response = requests.get(api).json()
 
         repo_list = [
             GitRepo(repo["name"].strip(), repo["ssh_url"].strip()) for repo in response
@@ -316,7 +330,9 @@ def main() -> None:
     install_path = command_installed(install_name)
     if not install_path:
         install_path = pathlib.Path(f"{pathlib.Path.cwd()}") / install_name
-        ensure_exists(install_path)
+        git_filter_repo_exists = ensure_exists(install_path)
+        if not git_filter_repo_exists:
+            raise FileNotFoundError("git-filter-repo not found.")
         ensure_executable(install_path)
 
     print(
@@ -326,9 +342,17 @@ def main() -> None:
     automatic_push = user_prompt_yes_no(prompt)
     prompt = "Do you want to update one repository or all respositories for a user (github only)?"
     options = {"One Repo": update_repo, "All Repos (github only)": update_all_repos}
+    github_url_prompt = "Please enter the url for the users/repos api endpoint on your github instance. Leave blank for the default. (ex: https://api.github.com/users/{github_user}/repos)"
+    github_url = input(f"{github_url_prompt}\n")
+    github_api_token = os.environ.get('FIX_AUTHORS_GITHUB_TOKEN', '')
+    if not github_api_token:
+        print("If you require an authorization token, please set the FIX_AUTHORS_GITHUB_TOKEN environment variable.")
+    
+    github_options = GithubOptions(api_url=github_url, api_token=github_api_token)
 
     clone_dir = pathlib.Path.cwd() / "fresh-repos"
-    git_client = GitClient(install_path, clone_dir)
+    
+    git_client = GitClient(install_path, clone_dir, github_options=github_options)
     call_back = user_prompt(prompt, options)
     call_back(client=git_client, automatic_push=automatic_push)
 
